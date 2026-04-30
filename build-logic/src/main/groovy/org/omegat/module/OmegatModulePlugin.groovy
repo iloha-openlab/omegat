@@ -40,10 +40,12 @@ class OmegatModulePlugin implements Plugin<Project> {
             from({
                 project.configurations.getByName("runtimeClasspath")
                         .resolve()
-                        .collect { it.directory ? it : project.zipTree(it) }
+                        .findAll { File f -> f.directory || f.name.endsWith('.jar') }
+                        .collect { File f -> f.directory ? f : project.zipTree(f) }
             })
             duplicatesStrategy = DuplicatesStrategy.EXCLUDE
             exclude "META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA"
+            exclude "**/*.dylib", "**/*.so", "**/*.dll"
             destinationDirectory.set(project.rootProject.layout.buildDirectory.dir("modules"))
             archiveBaseName.set(getPropertyOrDefault(project, 'org.omegat.module.packageName', project.name))
             manifest {

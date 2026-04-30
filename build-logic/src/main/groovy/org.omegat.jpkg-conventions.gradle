@@ -76,6 +76,12 @@ tasks.register('jpackageAppContentTips', Sync) {
     dependsOn jpackage
     dependsOn tipsHtmls
 }
+tasks.register('jpackageAppContentNativeLibs', Sync) {
+    from configurations.linuxNativeLibs
+    into layout.buildDirectory.file("jpackage/app-image/${application.applicationName}/lib/native")
+    dependsOn jpackage
+}
+
 tasks.register('jpackageAppContent') {
     dependsOn jpackageAppContentGreetings
     dependsOn jpackageAppContentManuals
@@ -84,6 +90,7 @@ tasks.register('jpackageAppContent') {
     dependsOn jpackageAppContentModules
     dependsOn jpackageAppContentScripts
     dependsOn jpackageAppContentTips
+    dependsOn jpackageAppContentNativeLibs
 }
 
 // construct package contents in standard file tree
@@ -98,10 +105,13 @@ tasks.register('jpackage', Exec) {
 
     def osName = System.getProperty('os.name').toLowerCase()
     def icon = 'images/OmegaT.png'
+    def resourceDir = "release/jpackage-specific/linux/"
     if (osName.contains('windows')) {
         icon = "images/OmegaT.ico"
+        resourceDir = "release/windows-specific/windows"
     } else if (osName.contains('mac')) {
         icon = "images/OmegaT.icns"
+        resourceDir = "release/mac-specific"
     }
     commandLine(file(Paths.get(System.getProperty('java.home')).resolve("bin/jpackage")),
             '--type', 'app-image',
@@ -117,7 +127,7 @@ tasks.register('jpackage', Exec) {
             '--java-options', "-Xmx1024M",
             '--java-options', "--add-opens",
             '--java-options', "java.desktop/sun.awt.X11=ALL-UNNAMED",
-            '--resource-dir', file("release/jpackage-specific/linux/"))
+            '--resource-dir', file(resourceDir))
 }
 
 // generate DEB package

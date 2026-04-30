@@ -35,6 +35,8 @@ import com.formdev.flatlaf.FlatLaf;
 import com.formdev.flatlaf.FlatLightLaf;
 import org.jspecify.annotations.NullMarked;
 
+import org.omegat.util.StaticUtils;
+
 /**
  * A default light theme customized from FlatLightLaf.
  *
@@ -51,6 +53,7 @@ public class DefaultFlatLightTheme extends FlatLaf {
      * Registers the default Flat Light Theme with the system UIManager.
      */
     public static void loadPlugins() {
+        System.setProperty("flatlaf.nativeLibraryPath", StaticUtils.getNativeLibDir());
         UIManager.installLookAndFeel(NAME, DefaultFlatLightTheme.class.getName());
     }
 

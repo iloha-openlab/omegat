@@ -3,6 +3,7 @@ macCodesignIdentity=
 
 ## Mac notarization
 macNotarizationUsername=
+macNotarizationKeychainProfile=AC_PASSWORD
 
 ## Sonatype OSSRH publishing (synced to Maven Central)
 ossrhUsername=
