@@ -1,0 +1,325 @@
+# .github/workflows/release-macos-prem.yml
+#
+# OmegaT Premium - macOS Build, Sign, Notarize and Publish
+#
+# Triggered by pushing a tag matching v*-prem (e.g. v6.1.0-prem)
+# from a prem/* branch.
+#
+# Branch strategy:
+#   releases/6.1      upstream OSS maintenance branch
+#   workflows/prem    CI/signing/plugin configs (.github/, ci/, debian/)
+#       ↓ (merge both into)
+#   prem/6.1          premium branch — source identical to releases/6.1
+#       ↓ (tag)
+#   v6.1.0-prem       triggers this workflow
+#
+# Gradle task responsibilities:
+#   distSourceZip            build source distribution
+#   installArmMacDist        builds app into build/install/OmegaT/
+#   installArmMacSignedDist  runs codesign via Exec on the above artifact
+#
+# CI responsibilities:
+#   - Setup/teardown ephemeral keychain for Gradle's codesign Exec
+#   - Produce DMG via hdiutil
+#   - Notarize DMG via notarytool
+#   - Staple notarization ticket
+#   - Publish to GitHub Releases
+#
+# Required GitHub Secrets:
+#   MACOS_CERTIFICATE_P12       base64-encoded .p12 certificate
+#   MACOS_CERTIFICATE_PASSWORD  p12 export password
+#   MACOS_KEYCHAIN_PASSWORD     ephemeral keychain password (any strong string)
+#   SIGNING_IDENTITY            e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                    Apple ID email for notarization
+#   APPLE_TEAM_ID               10-character Apple Team ID
+#   APPLE_APP_PASSWORD          App-specific password from appleid.apple.com
+
+name: Release macOS distribution
+
+on:
+  push:
+    tags:
+      - 'v*-prem'        # e.g. v6.1.0-prem
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version string (e.g. 6.1.0-prem)'
+        required: true
+        type: string
+
+jobs:
+  build-sign-notarize:
+    runs-on: macos-latest
+
+    permissions:
+      contents: write    # needed for creating GitHub Releases
+
+    steps:
+      # ---------------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify tag is on prem/* branch
+        run: |
+          BRANCH=$(git branch -r --contains HEAD | grep 'prem/' | head -n 1 | xargs)
+          if [ -z "$BRANCH" ]; then
+            echo "Error: Tag must be on a prem/* branch"
+            echo "Branches containing HEAD:"
+            git branch -r --contains HEAD
+            exit 1
+          fi
+          echo "Building from branch: $BRANCH"
+
+      # ---------------------------------------------------------------
+      # 2. Derive version
+      # ---------------------------------------------------------------
+      - name: Derive version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"   # strips leading 'v' → 6.1.0-prem
+          fi
+          BASE="${VERSION%-prem}"            # → 6.1.0
+          echo "version=$VERSION"   >> $GITHUB_OUTPUT
+          echo "base_version=$BASE" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION  Base: $BASE"
+
+      # ---------------------------------------------------------------
+      # 3. Apply premium patches
+      # ---------------------------------------------------------------
+      - name: Install quilt
+        run: brew install quilt
+
+      - name: Apply patches
+        run: |
+          if [ -f patches/series ]; then
+            export QUILT_PATCHES=patches
+            quilt push -a
+            echo "All patches applied"
+          else
+            echo "No patch series found, skipping"
+          fi
+
+      # ---------------------------------------------------------------
+      # 4. Set up JDK 17
+      # ---------------------------------------------------------------
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ---------------------------------------------------------------
+      # 5. Download macOS JRE
+      # ---------------------------------------------------------------
+      - name: Download macOS JRE
+        run: |
+          mkdir -p $RUNNER_TEMP/asset
+          cd $RUNNER_TEMP/asset
+          curl -L -O https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.3%2B9/OpenJDK25U-jre_aarch64_mac_hotspot_25.0.3_9.tar.gz
+
+      # ---------------------------------------------------------------
+      # 6. Gradle cache
+      # ---------------------------------------------------------------
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+            gradle-
+
+      # ---------------------------------------------------------------
+      # 7. Build app bundle and sourceZip (unsigned)
+      # ---------------------------------------------------------------
+      - name: Build macOS app bundle
+        run: |
+          ./gradlew clean installArmMacDist sourceDistZip \
+            --build-cache \
+            -PenvIsCi \
+            -PassetDir=$RUNNER_TEMP/asset
+
+      # ---------------------------------------------------------------
+      # 8. Inject premium plugins
+      # ---------------------------------------------------------------
+      - name: Inject premium plugins
+        run: |
+          PLUGIN_DIR="build/install/OmegaT/OmegaT.app/Contents/Java/plugins"
+          mkdir -p "$PLUGIN_DIR"
+          if ls ci/plugins/*.jar 2>/dev/null; then
+            cp ci/plugins/*.jar "$PLUGIN_DIR/"
+            echo "Injected plugins:"
+            ls -lh "$PLUGIN_DIR"
+          else
+            echo "No plugins found in ci/plugins/, skipping"
+          fi
+
+      # ---------------------------------------------------------------
+      # 10. Setup ephemeral keychain
+      #     Must be done before installArmMacSignedDist so that
+      #     Gradle's codesign Exec task can find the certificate.
+      # ---------------------------------------------------------------
+      - name: Setup keychain
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$CERTIFICATE_P12" | base64 --decode > $RUNNER_TEMP/cert.p12
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+
+          security import $RUNNER_TEMP/cert.p12 \
+            -k build.keychain \
+            -P "$CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" \
+            build.keychain
+
+          echo "Keychain ready. Available signing identities:"
+          security find-identity -v -p codesigning build.keychain
+
+      # ---------------------------------------------------------------
+      # 11. Sign
+      # ---------------------------------------------------------------
+      - name: Sign app bundle
+        env:
+          SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
+        run: |
+          APP_PATH="build/install/OmegaT/OmegaT.app"
+ 
+          # Sign nested dylibs and .so files first
+          find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) \
+            | while read bin; do
+                codesign --sign "$SIGNING_IDENTITY" \
+                  --force --options runtime "$bin"
+              done
+ 
+          # Sign executables in MacOS/
+          find "$APP_PATH/Contents/MacOS" -type f -perm +111 \
+            | while read bin; do
+                codesign --sign "$SIGNING_IDENTITY" \
+                  --force --options runtime "$bin"
+              done
+ 
+          # Sign the app bundle itself
+          codesign --sign "$SIGNING_IDENTITY" \
+            --deep --force \
+            --options runtime \
+            --entitlements release/mac-specific/java.entitlements \
+            "$APP_PATH"
+
+          echo "Verifying signature..."
+          codesign --verify --deep --strict --verbose=2 \
+            build/install/OmegaT/OmegaT.app
+          echo "Signature OK"
+
+      # ---------------------------------------------------------------
+      # 12. Cleanup keychain
+      #     Done here — immediately after signing is complete.
+      #     The always() cleanup in step 15 is a safety net.
+      # ---------------------------------------------------------------
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          security delete-keychain build.keychain || true
+          rm -f $RUNNER_TEMP/cert.p12
+
+      # ---------------------------------------------------------------
+      # 13. Produce DMG via hdiutil
+      # ---------------------------------------------------------------
+      - name: Create DMG
+        run: |
+          APP_PATH="build/install/OmegaT/OmegaT.app"
+          DMG_NAME="OmegaT-${{ steps.version.outputs.version }}-macOS-arm64.dmg"
+          DMG_PATH="$GITHUB_WORKSPACE/$DMG_NAME"
+          STAGING_DIR=$RUNNER_TEMP/dmg-staging
+
+          mkdir -p "$STAGING_DIR"
+          cp -r "$APP_PATH" "$STAGING_DIR/"
+          # Symlink /Applications for drag-install UX
+          ln -s /Applications "$STAGING_DIR/Applications"
+
+          hdiutil create \
+            -volname "OmegaT Premium ${{ steps.version.outputs.base_version }}" \
+            -srcfolder "$STAGING_DIR" \
+            -ov \
+            -format UDZO \
+            "$DMG_PATH"
+
+          echo "dmg_path=$DMG_PATH"   >> $GITHUB_ENV
+          echo "dmg_name=$DMG_NAME"   >> $GITHUB_ENV
+          echo "DMG created: $DMG_PATH"
+          ls -lh "$DMG_PATH"
+
+      # ---------------------------------------------------------------
+      # 14. Notarize DMG
+      # ---------------------------------------------------------------
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          echo "Submitting ${{ env.dmg_name }} to Apple notary service..."
+          xcrun notarytool submit "${{ env.dmg_path }}" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait \
+            --output-format json | tee $RUNNER_TEMP/notarize_result.json
+
+          STATUS=$(jq -r '.status' $RUNNER_TEMP/notarize_result.json)
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "Notarization failed: $STATUS"
+            SUBMISSION_ID=$(jq -r '.id' $RUNNER_TEMP/notarize_result.json)
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD"
+            exit 1
+          fi
+          echo "Notarization accepted"
+
+      # ---------------------------------------------------------------
+      # 15. Staple
+      # ---------------------------------------------------------------
+      - name: Staple notarization ticket
+        run: |
+          xcrun stapler staple "${{ env.dmg_path }}"
+          xcrun stapler validate "${{ env.dmg_path }}"
+          echo "Staple OK"
+
+      # ---------------------------------------------------------------
+      # 16. Publish to GitHub Releases
+      # ---------------------------------------------------------------
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: OmegaT Premium ${{ steps.version.outputs.version }}
+          body: |
+            ## OmegaT Premium ${{ steps.version.outputs.version }}
+
+            Based on OmegaT ${{ steps.version.outputs.base_version }} (GPL-3).
+            macOS arm64 — Signed and notarized by Apple.
+
+            ### GPL-3 Source Disclosure
+            Source modifications are attached as `${{ env.src_pkg_name }}`.
+            Apply against upstream: https://github.com/omegat-org/omegat/tree/releases/${{ steps.version.outputs.base_version }}
+          files: |
+            ${{ env.dmg_path }}
+            ${{ github.workspace }}/${{ env.src_pkg_name }}
