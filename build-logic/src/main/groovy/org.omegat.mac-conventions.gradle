@@ -48,45 +48,10 @@ tasks.register('genMac') {
     }
 }
 
-ext.makeHunspellSignTask = {
-    def hunspellJar = configurations.runtimeClasspath.files.find {
-        it.name.startsWith('hunspell')
-    }
-    tasks.register('hunspellJarSignedContents', Sync) {
-        onlyIf {
-            // Set this in e.g. local.properties
-            conditions([project.hasProperty('macCodesignIdentity'), 'Code signing property not set'],
-                    [exePresent('codesign'), 'codesign command is not present in system.'])
-        }
-        from zipTree(hunspellJar)
-
-        destinationDir = file(layout.buildDirectory.file("hunspell"))
-        doLast {
-            def dylibs = fileTree(dir: destinationDir, include: '**/*.dylib').files
-            injected.execOps.exec {
-                commandLine('codesign', '--deep', '--force',
-                        '--sign', project.property('macCodesignIdentity'),
-                        '--timestamp',
-                        '--options', 'runtime',
-                        '--entitlements', file('release/mac-specific/java.entitlements'),
-                        *dylibs.toList())
-            }
-        }
-    }
-
-    tasks.register('hunspellSignedJar', Jar) {
-        from hunspellJarSignedContents.outputs
-        archiveFileName.set(hunspellJar.name)
-    }
-}
-
 ext.makeMacTask = { args ->
     String installTaskName = 'install' + args.name.capitalize()  + "Dist"
     String signedInstallTaskName = 'install' + args.name.capitalize() + "SignedDist"
     String distZipTaskName = args.name + "DistZip"
-    String signedZipTaskName = args.name + "Signed"
-    String notarizeTaskName = args.name + "Notarize"
-    String stapledNotarizedDistZipTaskName = args.name + "StapledNotarized"
     def parentTask = tasks.getByName(args.parentTaskName)
     def versionPart = project.ext.omtVersion.version + project.ext.omtVersion.beta
 
@@ -115,6 +80,10 @@ ext.makeMacTask = { args ->
             with distributions.main.contents
             exclude '*.sh', '*.kaptn', 'OmegaT', 'OmegaT.bat', 'omegat.desktop', '*.exe'
         }
+        // Native libraries go in Contents/Frameworks for macOS notarization
+        into('OmegaT.app/Contents/Frameworks') {
+            from configurations.macNativeLibs
+        }
         duplicatesStrategy = DuplicatesStrategy.INCLUDE
         archiveFileName.set("${application.applicationName}_${versionPart}_${args.suffix}.zip")
         if (args.jrePath && !args.jrePath.empty) {
@@ -137,8 +106,6 @@ ext.makeMacTask = { args ->
         }
         group = 'omegat distribution'
     }
-    assemble.dependsOn distZipTask
-    parentTask.dependsOn distZipTask
 
     def installTask = tasks.register(installTaskName, Sync) {
         description = 'Builds the macOS distribution.'
@@ -166,6 +133,10 @@ ext.makeMacTask = { args ->
             with distributions.main.contents
             exclude '*.sh', '*.kaptn', 'OmegaT', 'OmegaT.bat', 'omegat.desktop', '*.exe'
         }
+        // Native libraries go in Contents/Frameworks for macOS notarization
+        into('OmegaT.app/Contents/Frameworks') {
+            from configurations.macNativeLibs
+        }
         if (args.jrePath && !args.jrePath.empty) {
             from(tarTree(args.jrePath.singleFile)) {
                 into 'OmegaT.app/Contents/PlugIns'
@@ -187,7 +158,6 @@ ext.makeMacTask = { args ->
             delete "$destinationDir/OmegaT.app/Contents/PlugIns/jre.bundle"
         }
         group = 'distribution'
-        dependsOn tasks.named('hunspellSignedJar')
     }
 
     def signedInstallTask = tasks.register(signedInstallTaskName, Sync) {
@@ -199,9 +169,6 @@ ext.makeMacTask = { args ->
                     [exePresent('codesign'), 'codesign command is not present in system.'])
         }
         from(installTask)
-        from(hunspellSignedJar) {
-            into 'OmegaT.app/Contents/Java/lib'
-        }
         duplicatesStrategy = DuplicatesStrategy.INCLUDE
         destinationDir = file(layout.buildDirectory.file("install/${application.applicationName}-${args.suffix}_Signed"))
         doFirst {
@@ -218,57 +185,6 @@ ext.makeMacTask = { args ->
             }
         }
         group = 'distribution'
-        dependsOn hunspellSignedJar
     }
-
-    def signedZipTask = tasks.register(signedZipTaskName, Zip) {
-        def zipRoot = "${application.applicationName}_${versionPart}_${args.suffix}_Signed"
-        from signedInstallTask
-        into zipRoot
-        archiveFileName.set("${zipRoot}.zip")
-        group = 'omegat distribution'
-        dependsOn signedInstallTaskName
-    }
-
-    tasks.register(notarizeTaskName, Exec) {
-        onlyIf {
-            conditions([project.hasProperty('macNotarizationUsername'), 'Username for notarization not set'],
-                    [exePresent('xcrun'), 'XCode is not present in system.'])
-        }
-        inputs.files signedZipTask.get().archiveFile
-        doLast {
-            injected.execOps.exec {
-                // Assuming setup per instructions at
-                // https://developer.apple.com/documentation/security/notarizing_your_app_before_distribution/customizing_the_notarization_workflow#3087734
-                commandLine 'xcrun', 'altool', '--notarize-app',
-                        '--primary-bundle-id', "org.omegat.$version",
-                        '--username', project.property('macNotarizationUsername'),
-                        '--password', '@keychain:AC_PASSWORD',
-                        '--file', signedZipTask.get().archiveFile
-            }
-        }
-        dependsOn signedZipTask
-    }
-
-    tasks.register(stapledNotarizedDistZipTaskName, Zip) {
-        def zipRoot = "${application.applicationName}_${versionPart}_${args.suffix}_Notarized"
-        from signedInstallTask
-        into zipRoot
-        onlyIf {
-            condition(exePresent('xcrun'), 'XCode is not present in system.')
-        }
-        doFirst {
-            if (args.name.equals("mac")) {
-                injected.execOps.exec {
-                    commandLine 'xcrun', 'stapler', 'staple', "${macInstallSignedDist.destinationDir}/OmegaT.app"
-                }
-            } else {
-                injected.execOps.exec {
-                    commandLine 'xcrun', 'stapler', 'staple', "${armMacInstallSignedDist.destinationDir}/OmegaT.app"
-                }
-            }
-        }
-        archiveFileName.set("${zipRoot}.zip")
-        dependsOn signedInstallTask
-    }
+    parentTask.dependsOn installTask
 }

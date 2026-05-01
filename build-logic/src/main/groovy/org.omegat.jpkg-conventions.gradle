@@ -76,6 +76,12 @@ tasks.register('jpackageAppContentTips', Sync) {
     dependsOn jpackage
     dependsOn tipsHtmls
 }
+tasks.register('jpackageAppContentNativeLibs', Sync) {
+    from configurations.linuxNativeLibs
+    into layout.buildDirectory.file("jpackage/app-image/${application.applicationName}/lib/native")
+    dependsOn jpackage
+}
+
 tasks.register('jpackageAppContent') {
     dependsOn jpackageAppContentGreetings
     dependsOn jpackageAppContentManuals
@@ -84,6 +90,7 @@ tasks.register('jpackageAppContent') {
     dependsOn jpackageAppContentModules
     dependsOn jpackageAppContentScripts
     dependsOn jpackageAppContentTips
+    dependsOn jpackageAppContentNativeLibs
 }
 
 // construct package contents in standard file tree
@@ -96,13 +103,7 @@ tasks.register('jpackage', Exec) {
     outputs.files file(layout.buildDirectory.file("jpackage/app-image"))
     onlyIf { gradleOnJava17OrLater }
 
-    def osName = System.getProperty('os.name').toLowerCase()
     def icon = 'images/OmegaT.png'
-    if (osName.contains('windows')) {
-        icon = "images/OmegaT.ico"
-    } else if (osName.contains('mac')) {
-        icon = "images/OmegaT.icns"
-    }
     commandLine(file(Paths.get(System.getProperty('java.home')).resolve("bin/jpackage")),
             '--type', 'app-image',
             '--app-version', version,
@@ -126,9 +127,13 @@ tasks.register("linuxDistDeb", Exec) {
     dependsOn jpackageAppContent
     group = 'distribution'
     def debVersion = '3'
+    def debArch = 'amd64'
+    if (osdetector.classifier == 'linux-aarch_64') {
+        debArch = 'arm64'
+    }
     inputs.files file(layout.buildDirectory.file("jpackage/app-image/${application.applicationName}"))
     outputs.files file(layout.buildDirectory
-            .file("distributions/${application.applicationName}_${version}-${debVersion}_amd64.deb"))
+            .file("distributions/${application.applicationName}_${version}-${debVersion}_${debArch}.deb"))
     onlyIf { gradleOnJava17OrLater && exePresent('dpkg-deb') }
 
     commandLine(file(Paths.get(System.getProperty('java.home')).resolve("bin/jpackage")),
@@ -159,9 +164,13 @@ tasks.register("linuxDistRpm", Exec) {
     dependsOn jpackageAppContent
     group = 'distribution'
     def rpmVersion = '3'
+    def rpmArch = 'x86_64'
+    if (osdetector.classifier == 'linux-aarch_64') {
+        rpmArch = 'aarch64'
+    }
     inputs.files file(layout.buildDirectory.file("jpackage/app-image/${application.applicationName}"))
     outputs.files file(layout.buildDirectory
-            .file("distributions/${application.applicationName}-${version}-${rpmVersion}.x86_64.rpm"))
+            .file("distributions/${application.applicationName}-${version}-${rpmVersion}.${rpmArch}.rpm"))
     onlyIf { gradleOnJava17OrLater && exePresent('rpm') }
 
     commandLine(file(Paths.get(System.getProperty('java.home')).resolve("bin/jpackage")),

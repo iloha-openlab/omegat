@@ -77,6 +77,10 @@ sourceSets {
 configurations {
     all
     [testRuntime, testCompile]*.exclude group: 'org.languagetool', module: 'language-all'
+    // Platform-specific native library artifacts placed outside of JARs for signing/notarization
+    macNativeLibs
+    linuxNativeLibs
+    windowsNativeLibs
 }
 
 dependencies {
@@ -84,10 +88,9 @@ dependencies {
     if (providedCoreLibsDir.directory) {
         api fileTree(dir: providedCoreLibsDir, includes: ['**/slf4j-api-*.jar', '**/jaxb-api-*.jar'])
         implementation fileTree(dir: providedCoreLibsDir, include: '**/*.jar', excludes: ['**/slf4j-api-*.jar',
-            '**/slf4j-jdk14-*.jar', 'language-detector-*.jar', '**/hunspell-*.jar',
-                '**/groovy*.jar', '**/jaxb-runtime-*.jar'])
+            '**/slf4j-jdk14-*.jar', 'language-detector-*.jar', '**/groovy*.jar', '**/jaxb-runtime-*.jar'])
         runtimeOnly fileTree(dir: providedCoreLibsDir, includes: ['**/slf4j-jdk14-*.jar',
-            '**/language-detector-*.jar', '**/hunspell-*.jar', '**/groovy*.jar', '**/jaxb-runtime-*.jar'])
+            '**/language-detector-*.jar', '**/groovy*.jar', '**/flatlaf-*', '**/jaxb-runtime-*.jar'])
     } else {
         implementation(libs.commons.io)
         implementation(libs.commons.lang3)
@@ -192,8 +195,16 @@ dependencies {
         implementation(libs.jfa) {
             exclude module: 'jna'
         }
+        // Use no-natives JAR; native libraries are placed in platform-specific directories
+        // at packaging time via the macNativeLibs/linuxNativeLibs/windowsNativeLibs configurations.
+        runtimeOnly(libs.flatlaf) { artifact { classifier = "no-natives" } }
+        macNativeLibs(libs.flatlaf) { artifact { classifier = "macos-arm64"; extension = "dylib" } }
+        macNativeLibs(libs.flatlaf) { artifact { classifier = "macos-x86_64"; extension = "dylib" } }
+        linuxNativeLibs(libs.flatlaf) { artifact { classifier = "linux-x86_64"; extension = "so" } }
+        linuxNativeLibs(libs.flatlaf) { artifact { classifier = "linux-arm64"; extension = "so" } }
+        windowsNativeLibs(libs.flatlaf) { artifact { classifier = "windows-x86_64"; extension = "dll" } }
+        windowsNativeLibs(libs.flatlaf) { artifact { classifier = "windows-arm64"; extension = "dll" } }
     }
-
     // Test dependencies
     testFixturesApi(libs.junit4)
     // for http connection test
@@ -428,7 +439,6 @@ tasks.register('mac') {
     description = 'Builds the Mac distributions.'
     group = 'omegat distribution'
 }
-makeHunspellSignTask()
 makeMacTask(name: 'macX64', suffix: 'Mac_x64', jrePath: macJRE, parentTaskName: 'mac')
 makeMacTask(name: 'macArm', suffix: 'Mac_arm', jrePath: armMacJRE, parentTaskName: 'mac')
 

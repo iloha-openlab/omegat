@@ -141,6 +141,9 @@ public final class Main {
     private static CLIParameters.RUN_MODE runMode = CLIParameters.RUN_MODE.GUI;
 
     public static void main(String[] args) {
+        // Configure native library paths before any native library is loaded.
+        setupNativeLibraries();
+
         // Workaround for Java 17 or later support of JAXB.
         // See https://sourceforge.net/p/omegat/feature-requests/1682/#12c5
         System.setProperty("com.sun.xml.bind.v2.bytecode.ClassTailor.noOptimize", "true");
@@ -276,6 +279,27 @@ public final class Main {
         }
         if (result != 0) {
             System.exit(result);
+        }
+    }
+
+    /**
+     * Configure native library search paths before any native library is loaded.
+     * Only activates when the native library directory actually exists on disk
+     * (i.e., in packaged distributions), so development builds are unaffected.
+     */
+    private static void setupNativeLibraries() {
+        String nativeLibDir = StaticUtils.getNativeLibDir();
+        if (!new File(nativeLibDir).isDirectory()) {
+            return;
+        }
+        // JNA: load libjnidispatch from the explicit path, skip JAR auto-extraction
+        System.setProperty("jna.boot.library.path", nativeLibDir);
+        System.setProperty("jna.nounpack", "true");
+        // junixsocket (used by Apache SSHD for Unix domain sockets)
+        if (Platform.isMacOSX()) {
+            System.setProperty(
+                    "org.newsclub.net.unix.library.override.force",
+                    nativeLibDir + "/libjunixsocket-native.dylib");
         }
     }
 

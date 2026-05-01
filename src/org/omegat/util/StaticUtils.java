@@ -238,6 +238,25 @@ public final class StaticUtils {
     }
 
     /**
+     * Returns the directory containing platform-native libraries.
+     * <p>
+     * On macOS app bundles ({@code Contents/Java} layout), returns
+     * {@code Contents/Frameworks}. On all other platforms (or when no
+     * {@code Frameworks} sibling exists), returns a {@code native/}
+     * subdirectory of {@link #installDir()}.
+     */
+    public static String getNativeLibDir() {
+        String dir = installDir();
+        if (Platform.isMacOSX()) {
+            File frameworks = new File(new File(dir).getParentFile(), "Frameworks");
+            if (frameworks.exists()) {
+                return frameworks.getAbsolutePath();
+            }
+        }
+        return new File(dir, "native").getAbsolutePath();
+    }
+
+    /**
      * Returns the location of the configuration directory, depending on the
      * user's platform. Also creates the configuration directory, if necessary.
      * If any problems occur while the location of the configuration directory

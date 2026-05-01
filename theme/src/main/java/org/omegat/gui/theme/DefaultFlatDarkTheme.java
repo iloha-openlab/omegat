@@ -39,6 +39,8 @@ import com.formdev.flatlaf.FlatLaf;
 import com.formdev.flatlaf.util.SystemInfo;
 import org.jspecify.annotations.NullMarked;
 
+import org.omegat.util.StaticUtils;
+
 /**
  * A default dark theme customized from FlatDarkLaf.
  *
@@ -56,6 +58,7 @@ public class DefaultFlatDarkTheme extends FlatLaf {
      * Registers the default Flat Dark Theme with the system UIManager.
      */
     public static void loadPlugins() {
+        System.setProperty("flatlaf.nativeLibraryPath", StaticUtils.getNativeLibDir());
         UIManager.installLookAndFeel(NAME, DefaultFlatDarkTheme.class.getName());
     }
 
